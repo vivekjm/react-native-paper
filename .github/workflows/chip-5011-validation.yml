@@ -1,4 +1,4 @@
-name: Validate Chip 5011 maintenance
+name: Publish validated Chip 5011 candidate
 
 on:
   push:
@@ -7,104 +7,84 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  actions: read
+  contents: write
 
 jobs:
-  validate:
+  publish-candidate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - name: Apply the review fix to current upstream
+          name: chip-5011-validated-candidate
+          run-id: 33989484303
+          github-token: ${{ github.token }}
+          path: candidate
+      - name: Verify artifact hashes and publish only a candidate branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
           from pathlib import Path
-          import textwrap
+          from urllib.request import Request, urlopen
 
-          path = Path('src/components/Chip/Chip.tsx')
-          source = path.read_text()
-          start = source.index('      <TouchableRipple\n')
-          end = source.index('      </TouchableRipple>', start) + len('      </TouchableRipple>')
-          block = source[start:end]
-          opening, children = block.split('      >\n', 1)
-          children = children.rsplit('      </TouchableRipple>', 1)[0]
-          content = textwrap.indent(textwrap.dedent(children).strip(), '    ')
-          declaration = '  const chipContent = (\n' + content + '\n  );\n\n'
-          declaration += "  const accessibilityProps = {\n    'aria-label': ariaLabel,\n    role: role ?? (hasPassedTouchHandler ? 'button' : undefined),\n    'aria-selected': selected,\n    'aria-disabled': disabled,\n  } as const;\n\n"
-          replacement = '''      {hasPassedTouchHandler ? (
-                  <TouchableRipple
-                    borderless
-                    background={background}
-                    style={[{ borderRadius }, styles.touchable]}
-                    onPress={onPress}
-                    onLongPress={onLongPress}
-                    onPressIn={handlePressIn}
-                    onPressOut={handlePressOut}
-                    delayLongPress={delayLongPress}
-                    disabled={disabled}
-                    {...accessibilityProps}
-                    testID={testID}
-                    theme={theme}
-                    hitSlop={hitSlop}
-                  >
-                    {chipContent}
-                  </TouchableRipple>
-                ) : (
-                  <View
-                    accessible
-                    style={[{ borderRadius }, styles.touchable]}
-                    {...accessibilityProps}
-                    testID={testID}
-                  >
-                    {chipContent}
-                  </View>
-                )}'''
-          source = source[:start] + replacement + source[end:]
-          assert source.count("  role = 'button',") == 1
-          source = source.replace("  role = 'button',", '  role,')
-          marker = '  return (\n    <Surface\n'
-          assert source.count(marker) == 1
-          source = source.replace(marker, declaration + marker)
-          path.write_text(source)
+          repo = os.environ['GH_REPOSITORY']
+          assert repo == 'vivekjm/react-native-paper'
+          headers = {
+              'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+          }
+          def api(path, data=None):
+              request = Request(
+                  'https://api.github.com/repos/' + repo + '/' + path,
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers=headers,
+                  method='GET' if data is None else 'POST',
+              )
+              with urlopen(request, timeout=30) as response:
+                  return json.load(response)
 
-          path = Path('src/components/__tests__/Chip.test.tsx')
-          source = path.read_text()
-          old = "it('renders disabled chip if there is no touch handler passed', async () => {\n  await render(<Chip testID=\"disabled-chip\">Disabled chip</Chip>);\n\n  expect(screen.getByTestId('disabled-chip')).toBeDisabled();\n});"
-          new = "it('does not mark informational chip disabled', async () => {\n  await render(<Chip testID=\"informational-chip\">Informational chip</Chip>);\n\n  expect(screen.getByTestId('informational-chip')).not.toBeDisabled();\n});"
-          assert source.count(old) == 1
-          path.write_text(source.replace(old, new))
+          run = api('actions/runs/33989484303')
+          assert run['conclusion'] == 'success'
+          assert run['head_sha'] == '009842875dbe4c6dad59eb7afdce541e37e121e6'
+          expected = {
+              'src/components/Chip/Chip.tsx': '451a0c21c2737900e199d2ccf595ea37e294b558',
+              'src/components/__tests__/Chip.test.tsx': 'f417ac021c7e26d317ba151215257728bd4c2d66',
+              'src/components/__tests__/__snapshots__/Chip.test.tsx.snap': '91cf30590fcceccf3a225663dd142c74a4be6aff',
+          }
+          entries = []
+          for path, expected_sha in expected.items():
+              content = (Path('candidate') / path).read_bytes()
+              digest = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+              assert digest == expected_sha, path
+              blob = api('git/blobs', {
+                  'content': base64.b64encode(content).decode(),
+                  'encoding': 'base64',
+              })
+              assert blob['sha'] == expected_sha
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          tree = api('git/trees', {
+              'base_tree': '6a5a52ed0e7b6358217b772f017fdc9204062767',
+              'tree': entries,
+          })
+          commit = api('git/commits', {
+              'message': 'fix: preserve non-interactive Chip accessibility after upstream refactor',
+              'tree': tree['sha'],
+              'parents': [
+                  '893e14842eec38d63530d064ed0d437ffd90f5b8',
+                  '98e4a8484f2947b4414be39d528cb82838191c13',
+              ],
+          })
+          branch = 'maintenance/chip-5011-validated-20260906'
+          api('git/refs', {'ref': 'refs/heads/' + branch, 'sha': commit['sha']})
+          print(json.dumps({'candidate_branch': branch, 'commit_sha': commit['sha'], 'tree_sha': tree['sha'], 'files': expected}, indent=2))
           PY
-      - name: Install the lockfile-pinned workspace
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 install --immutable
-      - name: Format changed source
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 prettier --write src/components/Chip/Chip.tsx src/components/__tests__/Chip.test.tsx
-      - name: Regenerate the focused snapshots
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 test src/components/__tests__/Chip.test.tsx --runInBand --updateSnapshot
-      - name: Verify the focused suite without updating snapshots
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 test src/components/__tests__/Chip.test.tsx --runInBand
-      - name: Lint changed source
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 eslint src/components/Chip/Chip.tsx src/components/__tests__/Chip.test.tsx
-      - name: Type check
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 typecheck
-      - name: Check patch and collect results
-        if: always()
-        run: |
-          git diff --check
-          git diff -- src/components/Chip/Chip.tsx src/components/__tests__/Chip.test.tsx src/components/__tests__/__snapshots__/Chip.test.tsx.snap > chip-5011.patch
-      - name: Upload candidate and validation diff
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: chip-5011-validated-candidate
-          path: |
-            src/components/Chip/Chip.tsx
-            src/components/__tests__/Chip.test.tsx
-            src/components/__tests__/__snapshots__/Chip.test.tsx.snap
-            chip-5011.patch
-          retention-days: 7
