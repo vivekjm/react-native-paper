@@ -1,0 +1,139 @@
+name: Validate and stage IconButton 5014
+
+on:
+  push:
+    branches:
+      - maintenance/iconbutton-5014-validation-20260906
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply the original scoped fix and regression test
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/components/IconButton/IconButton.tsx')
+          s = p.read_text()
+          old = "  touchable: {\n    flexGrow: 1,"
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, "  touchable: {\n    flex: 1,"))
+          p = Path('src/components/__tests__/IconButton.test.tsx')
+          s = p.read_text()
+          old = "  slightlyRounded: {\n    borderRadius: 4,\n  },"
+          assert s.count(old) == 1
+          s = s.replace(old, old + "\n  customBackground: {\n    backgroundColor: pink500,\n  },")
+          marker = "describe('getIconButtonColor - icon color', () => {"
+          test = '''it('keeps touchable content centered with custom container style', async () => {
+            await render(
+              <IconButton icon="delete" testID="icon-button" style={styles.customBackground} />
+            );
+            expect(screen.getByTestId('icon-button')).toHaveStyle({
+              flex: 1,
+              justifyContent: 'center',
+              alignItems: 'center',
+            });
+          });
+
+          '''
+          assert s.count(marker) == 1
+          p.write_text(s.replace(marker, test + marker))
+          PY
+      - run: npx --yes @yarnpkg/cli-dist@4.9.1 install --immutable
+      - run: npx --yes @yarnpkg/cli-dist@4.9.1 prettier --write src/components/IconButton/IconButton.tsx src/components/__tests__/IconButton.test.tsx
+      - name: Run component tests and regenerate affected snapshots
+        run: npx --yes @yarnpkg/cli-dist@4.9.1 test src/components/__tests__ --runInBand --updateSnapshot
+      - name: Verify component tests without snapshot updates
+        run: npx --yes @yarnpkg/cli-dist@4.9.1 test src/components/__tests__ --runInBand
+      - name: Scoped ESLint
+        run: npx --yes @yarnpkg/cli-dist@4.9.1 eslint src/components/IconButton/IconButton.tsx src/components/__tests__/IconButton.test.tsx
+      - name: TypeScript check
+        run: npx --yes @yarnpkg/cli-dist@4.9.1 typecheck
+      - name: Collect only the allowed files
+        run: |
+          git diff --check
+          python3 - <<'PY'
+          import hashlib, json, shutil, subprocess
+          from pathlib import Path
+          allowed = {
+            'src/components/IconButton/IconButton.tsx',
+            'src/components/__tests__/IconButton.test.tsx',
+            'src/components/__tests__/Appbar/__snapshots__/Appbar.test.tsx.snap',
+            'src/components/__tests__/__snapshots__/DataTable.test.tsx.snap',
+            'src/components/__tests__/__snapshots__/IconButton.test.tsx.snap',
+            'src/components/__tests__/__snapshots__/Searchbar.test.tsx.snap',
+            'src/components/__tests__/__snapshots__/TextInput.test.tsx.snap',
+            'src/components/__tests__/__snapshots__/ToggleButton.test.tsx.snap',
+          }
+          paths = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          assert paths and set(paths) <= allowed, paths
+          manifest = {}
+          for path in paths:
+              content = Path(path).read_bytes()
+              manifest[path] = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+              out = Path('candidate') / path
+              out.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(path, out)
+          Path('candidate/manifest.json').write_text(json.dumps(manifest, indent=2))
+          Path('candidate/iconbutton-5014.patch').write_bytes(subprocess.check_output(['git', 'diff']))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iconbutton-5014-validated-candidate
+          path: candidate
+          retention-days: 7
+  stage-candidate:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: iconbutton-5014-validated-candidate
+          path: candidate
+      - name: Publish a candidate branch, not the PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          root = 'https://api.github.com/repos/vivekjm/react-native-paper/'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}
+          def post(path, payload):
+              with urlopen(Request(root + path, data=json.dumps(payload).encode(), headers=headers, method='POST'), timeout=30) as response:
+                  return json.load(response)
+          entries = []
+          manifest = json.loads(Path('candidate/manifest.json').read_text())
+          for path, expected in manifest.items():
+              assert path.startswith('src/components/') and '..' not in Path(path).parts
+              content = (Path('candidate') / path).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+              assert actual == expected
+              blob = post('git/blobs', {'content': base64.b64encode(content).decode(), 'encoding': 'base64'})
+              assert blob['sha'] == expected
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': expected})
+          tree = post('git/trees', {'base_tree': '6a5a52ed0e7b6358217b772f017fdc9204062767', 'tree': entries})
+          commit = post('git/commits', {
+              'message': 'fix: refresh IconButton centering and snapshots against current main',
+              'tree': tree['sha'],
+              'parents': ['e815aa37197bee38a23f095d01d33298cd94a996', '98e4a8484f2947b4414be39d528cb82838191c13'],
+          })
+          post('git/refs', {'ref': 'refs/heads/maintenance/iconbutton-5014-validated-20260906', 'sha': commit['sha']})
+          print(json.dumps({'candidate_sha': commit['sha'], 'tree_sha': tree['sha'], 'files': manifest}, indent=2))
+          PY
