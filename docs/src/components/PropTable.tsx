@@ -1,19 +1,16 @@
-// @ts-ignore
-import useDoc from '@site/component-docs-plugin/useDocs';
-
 import Markdown from './Markdown';
 
-const typeDefinitions = {
+const typeDefinitions: Record<string, string> = {
   IconSource:
-    'https://github.com/callstack/react-native-paper/blob/main/src/components/Icon.tsx#L16',
+    'https://github.com/callstack/react-native-paper/blob/main/components/Icon.tsx#L16',
   ThemeProp:
     'https://callstack.github.io/react-native-paper/docs/guides/theming#theme-properties',
   '(props: TextInputAccessoryProps) => React.ReactNode':
-    'https://github.com/callstack/react-native-paper/blob/main/src/components/TextInput/TextInputIcon.tsx#L11',
+    'https://github.com/callstack/react-native-paper/blob/main/components/TextInput/TextInputIcon.tsx#L11',
   '(props: TextInputRenderProps) => React.ReactNode':
-    'https://github.com/callstack/react-native-paper/blob/main/src/components/TextInput/TextInput.tsx#L168',
+    'https://github.com/callstack/react-native-paper/blob/main/components/TextInput/TextInput.tsx#L168',
   'React.Ref<TextInputHandles>':
-    'https://github.com/callstack/react-native-paper/blob/main/src/components/TextInput/TextInput.tsx#L172',
+    'https://github.com/callstack/react-native-paper/blob/main/components/TextInput/TextInput.tsx#L172',
   AccessibilityState:
     'https://reactnative.dev/docs/accessibility#accessibilitystate',
   'StyleProp<ViewStyle>': 'https://reactnative.dev/docs/view-style-props',
@@ -32,82 +29,122 @@ const renderBadge = (annotation: string) => {
   )} ">${annotLabel.join(' ')}</span>`;
 };
 
-export default function PropTable({
-  componentLink,
-  prop,
-}: {
+type LegacyProp = {
+  defaultValue?: {
+    value: string;
+  } | null;
+  description: string;
+  required: boolean;
+  tsType?: {
+    name: string;
+    raw?: string;
+  } | null;
+};
+
+type LegacyComponentDocs = Record<
+  string,
+  {
+    data: {
+      props: Record<string, LegacyProp>;
+    };
+  }
+>;
+
+type LegacyPropTableProps = {
+  componentDocs: LegacyComponentDocs;
   componentLink: string;
   prop: string;
-}) {
-  const doc = useDoc(componentLink);
+};
+
+type GeneratedPropTableProps = {
+  defaultValue?: string;
+  description: string;
+  type: string;
+};
+
+type PropTableProps = LegacyPropTableProps | GeneratedPropTableProps;
+
+const renderPropDetails = ({
+  defaultValue,
+  description,
+  type,
+}: GeneratedPropTableProps) => {
+  const tsTypeLink = typeDefinitions[type];
+
+  return (
+    <div>
+      <p>
+        Type:{' '}
+        {tsTypeLink ? (
+          <a
+            href={tsTypeLink}
+            target={
+              tsTypeLink.startsWith(
+                'https://callstack.github.io/react-native-paper'
+              )
+                ? '_self'
+                : '_blank'
+            }
+            rel="noreferrer"
+          >
+            <code>{type}</code>
+          </a>
+        ) : (
+          <code>{type}</code>
+        )}
+      </p>
+      {defaultValue && (
+        <p>
+          Default value: <code>{defaultValue}</code>
+        </p>
+      )}
+      <Markdown content={description} />
+    </div>
+  );
+};
+
+export default function PropTable(tableProps: PropTableProps) {
+  if ('type' in tableProps) {
+    return renderPropDetails(tableProps);
+  }
+
+  const doc = tableProps.componentDocs[tableProps.componentLink];
 
   if (!doc?.data?.props) {
     return null;
   }
 
-  const props = doc.data.props;
+  const prop = doc.data.props[tableProps.prop];
 
-  return (
-    <div>
-      {Object.keys(props).map((key) => {
-        if (key !== prop) {
-          return null;
-        }
-        let descriptionByLines = props[key].description.split('\n');
+  if (!prop) {
+    return null;
+  }
 
-        // Slice leading badge - it's handled in `generatePageMDX`
-        if (descriptionByLines[0].includes('@')) {
-          descriptionByLines = descriptionByLines.slice(1);
-        }
-        descriptionByLines = descriptionByLines.map((line: string) => {
-          // Replace annotations with styled badges.
-          if (line.includes('@')) {
-            const annotIndex = line.indexOf('@');
+  let descriptionByLines = prop.description.split('\n');
 
-            return `${line.substr(0, annotIndex)} ${renderBadge(
-              line.substr(annotIndex)
-            )}`;
-          } else {
-            return line;
-          }
-        });
+  // Slice leading badge - it's handled in `generatePageMDX`
+  if (descriptionByLines[0].includes('@')) {
+    descriptionByLines = descriptionByLines.slice(1);
+  }
 
-        const description = descriptionByLines.join('\n');
-        const tsType = props[key].tsType?.raw ?? props[key].tsType?.name;
-        // @ts-ignore
-        const tsTypeLink = typeDefinitions[tsType];
+  const description = descriptionByLines
+    .map((line) => {
+      // Replace annotations with styled badges.
+      if (!line.includes('@')) {
+        return line;
+      }
 
-        return (
-          <div key={key}>
-            <p>
-              Type:{' '}
-              {tsTypeLink ? (
-                <a
-                  href={tsTypeLink}
-                  target={
-                    tsTypeLink.startsWith(
-                      'https://callstack.github.io/react-native-paper'
-                    )
-                      ? '_self'
-                      : '_blank'
-                  }
-                  rel="noreferrer"
-                >
-                  <code>{tsType}</code>
-                </a>
-              ) : (
-                <code>{tsType}</code>
-              )}
-            </p>
-            {props[key].defaultValue && (
-              <p>
-                Default value: <code>{props[key].defaultValue.value}</code>
-              </p>
-            )}
-            <Markdown content={description} />
-          </div>
-        );
-      })}
-    </div>
-  );
+      const annotIndex = line.indexOf('@');
+
+      return `${line.substr(0, annotIndex)} ${renderBadge(
+        line.substr(annotIndex)
+      )}`;
+    })
+    .join('\n');
+
+  return renderPropDetails({
+    defaultValue: prop.defaultValue?.value,
+    description,
+    type: prop.tsType?.raw ?? prop.tsType?.name ?? '',
+  });
 }

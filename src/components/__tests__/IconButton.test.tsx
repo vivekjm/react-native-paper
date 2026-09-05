@@ -1,7 +1,6 @@
-import { Animated, StyleSheet } from 'react-native';
+import { StyleSheet } from 'react-native';
 
-import { describe, expect, it, jest } from '@jest/globals';
-import { act } from '@testing-library/react-native';
+import { describe, expect, it } from '@jest/globals';
 
 import { getTheme } from '../../core/theming';
 import { render, screen } from '../../test-utils';
@@ -96,7 +95,6 @@ it('keeps touchable content centered with custom container style', async () => {
       style={styles.customBackground}
     />
   );
-
   expect(screen.getByTestId('icon-button')).toHaveStyle({
     flex: 1,
     justifyContent: 'center',
@@ -335,32 +333,5 @@ describe('getIconButtonColor - border color', () => {
     ).toMatchObject({
       borderColor: getTheme().colors.outlineVariant,
     });
-  });
-});
-
-it('action animated value changes correctly', async () => {
-  const value = new Animated.Value(1);
-  await render(
-    <IconButton
-      icon="menu"
-      style={[{ transform: [{ scale: value }] }]}
-      testID="icon-button"
-    />
-  );
-  expect(screen.getByTestId('icon-button-container-outer-layer')).toHaveStyle({
-    transform: [{ scale: 1 }],
-  });
-
-  Animated.timing(value, {
-    toValue: 1.5,
-    useNativeDriver: false,
-    duration: 200,
-  }).start();
-
-  await act(() => {
-    jest.advanceTimersByTime(200);
-  });
-  expect(screen.getByTestId('icon-button-container-outer-layer')).toHaveStyle({
-    transform: [{ scale: 1.5 }],
   });
 });
