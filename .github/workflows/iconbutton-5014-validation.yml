@@ -1,14 +1,13 @@
 name: Validate and stage IconButton 5014
-
 on:
   push:
-    branches:
-      - maintenance/iconbutton-5014-validation-20260906
+    branches: [maintenance/iconbutton-5014-validation-20260906]
   workflow_dispatch:
-
 permissions:
   contents: read
-
+env:
+  PR_HEAD: c9072afc9051cb6803ae5b92edc3fd52b15ef89c
+  UPSTREAM: 84529e066767f99067e975524fa30b34cef2f8a7
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -16,25 +15,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: callstack/react-native-paper
+          ref: 84529e066767f99067e975524fa30b34cef2f8a7
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Apply the original scoped fix and regression test
+      - name: Adapt the original public-behavior regression to current tests
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('src/components/IconButton/IconButton.tsx')
-          s = p.read_text()
-          old = "  touchable: {\n    flexGrow: 1,"
-          assert s.count(old) == 1
-          p.write_text(s.replace(old, "  touchable: {\n    flex: 1,"))
-          p = Path('src/components/__tests__/IconButton.test.tsx')
-          s = p.read_text()
-          old = "  slightlyRounded: {\n    borderRadius: 4,\n  },"
-          assert s.count(old) == 1
-          s = s.replace(old, old + "\n  customBackground: {\n    backgroundColor: pink500,\n  },")
+          path = Path('src/components/__tests__/IconButton.test.tsx')
+          text = path.read_text()
+          assert text.count("import { render } from '../../test-utils';") == 1
+          text = text.replace("import { render } from '../../test-utils';", "import { render, screen } from '../../test-utils';")
+          marker = "  slightlyRounded: {\n    borderRadius: 4,\n  },"
+          assert text.count(marker) == 1
+          text = text.replace(marker, marker + '\n  customBackground: {\n    backgroundColor: pink500,\n  },')
           marker = "describe('getIconButtonColor - icon color', () => {"
+          assert text.count(marker) == 1
           test = '''it('keeps touchable content centered with custom container style', async () => {
             await render(
               <IconButton icon="delete" testID="icon-button" style={styles.customBackground} />
@@ -47,93 +46,96 @@ jobs:
           });
 
           '''
-          assert s.count(marker) == 1
-          p.write_text(s.replace(marker, test + marker))
+          path.write_text(text.replace(marker, test + marker))
           PY
-      - run: npx --yes @yarnpkg/cli-dist@4.9.1 install --immutable
-      - run: npx --yes @yarnpkg/cli-dist@4.9.1 prettier --write src/components/IconButton/IconButton.tsx src/components/__tests__/IconButton.test.tsx
-      - name: Run component tests and regenerate affected snapshots
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 test src/components/__tests__ --runInBand --updateSnapshot
-      - name: Verify component tests without snapshot updates
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 test src/components/__tests__ --runInBand
-      - name: Scoped ESLint
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 eslint src/components/IconButton/IconButton.tsx src/components/__tests__/IconButton.test.tsx
-      - name: TypeScript check
-        run: npx --yes @yarnpkg/cli-dist@4.9.1 typecheck
-      - name: Collect only the allowed files
+      - name: Install repository-pinned Yarn and lockfile
         run: |
-          git diff --check
+          npm install --global "$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).packageManager.replace("yarn@", "@yarnpkg/cli-dist@")')"
+          yarn install --immutable
+      - name: Confirm the regression fails before the style fix
+        run: |
           python3 - <<'PY'
-          import hashlib, json, shutil, subprocess
+          import subprocess
           from pathlib import Path
-          allowed = {
-            'src/components/IconButton/IconButton.tsx',
-            'src/components/__tests__/IconButton.test.tsx',
-            'src/components/__tests__/Appbar/__snapshots__/Appbar.test.tsx.snap',
-            'src/components/__tests__/__snapshots__/DataTable.test.tsx.snap',
-            'src/components/__tests__/__snapshots__/IconButton.test.tsx.snap',
-            'src/components/__tests__/__snapshots__/Searchbar.test.tsx.snap',
-            'src/components/__tests__/__snapshots__/TextInput.test.tsx.snap',
-            'src/components/__tests__/__snapshots__/ToggleButton.test.tsx.snap',
-          }
-          paths = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
-          assert paths and set(paths) <= allowed, paths
-          manifest = {}
-          for path in paths:
-              content = Path(path).read_bytes()
-              manifest[path] = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
-              out = Path('candidate') / path
-              out.parent.mkdir(parents=True, exist_ok=True)
-              shutil.copyfile(path, out)
-          Path('candidate/manifest.json').write_text(json.dumps(manifest, indent=2))
-          Path('candidate/iconbutton-5014.patch').write_bytes(subprocess.check_output(['git', 'diff']))
+          result = subprocess.run(['yarn', 'test', 'src/components/__tests__/IconButton.test.tsx', '--runInBand', '--testNamePattern=keeps touchable content centered'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+          Path('before-fix.log').write_text(result.stdout)
+          print(result.stdout)
+          assert result.returncode != 0 and 'toHaveStyle' in result.stdout and 'flex' in result.stdout
           PY
-      - uses: actions/upload-artifact@v4
+      - name: Apply the existing scoped style fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/components/IconButton/IconButton.tsx')
+          text = path.read_text()
+          assert text.count('    flexGrow: 1,') == 1
+          path.write_text(text.replace('    flexGrow: 1,', '    flex: 1,'))
+          PY
+          yarn prettier --write src/components/IconButton/IconButton.tsx src/components/__tests__/IconButton.test.tsx
+      - name: Regenerate affected component snapshots
+        run: yarn test src/components --runInBand --updateSnapshot
+      - name: Verify component tests without updating snapshots
+        run: yarn test src/components --runInBand
+      - name: Lint and type-check
+        run: |
+          yarn eslint src/components/IconButton/IconButton.tsx src/components/__tests__/IconButton.test.tsx
+          yarn typecheck
+          yarn prettier --check src/components/IconButton/IconButton.tsx src/components/__tests__/IconButton.test.tsx
+          git diff --check
+      - name: Collect only the original PR scope
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          allowed = {'src/components/IconButton/IconButton.tsx', 'src/components/__tests__/IconButton.test.tsx', 'src/components/__tests__/Appbar/__snapshots__/Appbar.test.tsx.snap'}
+          allowed |= {'src/components/__tests__/__snapshots__/' + name + '.test.tsx.snap' for name in ('DataTable', 'IconButton', 'Searchbar', 'TextInput', 'ToggleButton')}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed <= allowed, changed - allowed
+          report = {'base_tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(), 'parents': [os.environ['PR_HEAD'], os.environ['UPSTREAM']], 'files': [{'path': p, 'mode': '100644', 'type': 'blob', 'content': Path(p).read_text()} for p in sorted(changed)]}
+          Path('validated-changes.json').write_text(json.dumps(report, indent=2))
+          Path('validated.patch').write_bytes(subprocess.check_output(['git', 'diff', '--', *sorted(allowed)]))
+          print('Validated files:', sorted(changed))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: iconbutton-5014-validated-candidate
-          path: candidate
+          name: iconbutton-5014-validated-20260916
+          path: |
+            validated-changes.json
+            validated.patch
+            before-fix.log
           retention-days: 7
   stage-candidate:
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      actions: read
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: iconbutton-5014-validated-candidate
-          path: candidate
-      - name: Publish a candidate branch, not the PR branch
+          name: iconbutton-5014-validated-20260916
+      - name: Publish candidate only, preserving both parent histories
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import base64, hashlib, json, os
+          import json, os, urllib.request
           from pathlib import Path
-          from urllib.request import Request, urlopen
           root = 'https://api.github.com/repos/vivekjm/react-native-paper/'
-          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}
-          def post(path, payload):
-              with urlopen(Request(root + path, data=json.dumps(payload).encode(), headers=headers, method='POST'), timeout=30) as response:
+          def request(path, data=None):
+              headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
+              req = urllib.request.Request(root + path, data=None if data is None else json.dumps(data).encode(), headers=headers, method='GET' if data is None else 'POST')
+              with urllib.request.urlopen(req, timeout=30) as response:
                   return json.load(response)
-          entries = []
-          manifest = json.loads(Path('candidate/manifest.json').read_text())
-          for path, expected in manifest.items():
-              assert path.startswith('src/components/') and '..' not in Path(path).parts
-              content = (Path('candidate') / path).read_bytes()
-              actual = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
-              assert actual == expected
-              blob = post('git/blobs', {'content': base64.b64encode(content).decode(), 'encoding': 'base64'})
-              assert blob['sha'] == expected
-              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': expected})
-          tree = post('git/trees', {'base_tree': '6a5a52ed0e7b6358217b772f017fdc9204062767', 'tree': entries})
-          commit = post('git/commits', {
-              'message': 'fix: refresh IconButton centering and snapshots against current main',
-              'tree': tree['sha'],
-              'parents': ['e815aa37197bee38a23f095d01d33298cd94a996', '98e4a8484f2947b4414be39d528cb82838191c13'],
-          })
-          post('git/refs', {'ref': 'refs/heads/maintenance/iconbutton-5014-validated-20260906', 'sha': commit['sha']})
-          print(json.dumps({'candidate_sha': commit['sha'], 'tree_sha': tree['sha'], 'files': manifest}, indent=2))
+          report = json.loads(Path('validated-changes.json').read_text())
+          assert report['parents'] == [os.environ['PR_HEAD'], os.environ['UPSTREAM']]
+          allowed = {'src/components/IconButton/IconButton.tsx', 'src/components/__tests__/IconButton.test.tsx', 'src/components/__tests__/Appbar/__snapshots__/Appbar.test.tsx.snap'}
+          allowed |= {'src/components/__tests__/__snapshots__/' + name + '.test.tsx.snap' for name in ('DataTable', 'IconButton', 'Searchbar', 'TextInput', 'ToggleButton')}
+          assert {entry['path'] for entry in report['files']} <= allowed
+          assert request('git/ref/heads/fix-iconbutton-centered-content')['object']['sha'] == os.environ['PR_HEAD']
+          tree = request('git/trees', {'base_tree': report['base_tree'], 'tree': report['files']})
+          commit = request('git/commits', {'message': 'fix: refresh IconButton centering against current upstream tests', 'tree': tree['sha'], 'parents': report['parents']})
+          request('git/refs', {'ref': 'refs/heads/maintenance/iconbutton-5014-validated-20260916', 'sha': commit['sha']})
+          print('CANDIDATE_SHA=' + commit['sha'])
           PY
